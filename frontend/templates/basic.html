@@ -1,0 +1,602 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>火车实时追踪系统</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+
+        #map {
+            height: 100vh;
+            width: 100%;
+        }
+
+        .control-panel {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+            z-index: 1000;
+            min-width: 250px;
+        }
+
+        .control-panel h3 {
+            margin: 0 0 15px 0;
+            color: #333;
+            font-size: 16px;
+        }
+
+        .checkbox-group {
+            margin-bottom: 15px;
+        }
+
+        .checkbox-item {
+            display: flex;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+
+        .checkbox-item input[type="checkbox"] {
+            margin-right: 8px;
+        }
+
+        .file-upload {
+            margin-top: 15px;
+            padding-top: 15px;
+            border-top: 1px solid #eee;
+        }
+
+        .file-upload label {
+            display: block;
+            margin-bottom: 5px;
+            font-size: 14px;
+            color: #666;
+        }
+
+        .file-upload input[type="file"] {
+            width: 100%;
+            padding: 5px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            margin-bottom: 10px;
+        }
+
+        .drop-zone {
+            border: 2px dashed #ddd;
+            border-radius: 4px;
+            padding: 20px;
+            text-align: center;
+            color: #666;
+            margin-top: 10px;
+            transition: border-color 0.3s;
+        }
+
+        .drop-zone.dragover {
+            border-color: #1976d2;
+            background-color: #f5f5f5;
+        }
+
+        .status {
+            margin-top: 15px;
+            padding: 10px;
+            border-radius: 4px;
+            font-size: 12px;
+        }
+
+        .status.success {
+            background-color: #e8f5e8;
+            color: #2e7d32;
+        }
+
+        .status.error {
+            background-color: #ffebee;
+            color: #c62828;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="map"></div>
+
+    <div class="control-panel">
+        <h3>🚂 控制面板</h3>
+
+        <div class="checkbox-group">
+            <div class="checkbox-item">
+                <input type="checkbox" id="showStations" checked>
+                <label for="showStations">显示车站 🚉</label>
+            </div>
+            <div class="checkbox-item">
+                <input type="checkbox" id="showTrains" checked>
+                <label for="showTrains">显示火车 🚂</label>
+            </div>
+            <div class="checkbox-item">
+                <input type="checkbox" id="showLines" checked>
+                <label for="showLines">显示线路 🛤️</label>
+            </div>
+        </div>
+
+        <div class="file-upload">
+            <label>上传车站数据:</label>
+            <input type="file" id="stationsFile" accept=".json">
+
+            <label>上传线路数据:</label>
+            <input type="file" id="linesFile" accept=".geojson,.json">
+
+            <div class="drop-zone" id="dropZone">
+                拖拽文件到这里
+            </div>
+        </div>
+
+        <div id="status" class="status" style="display: none;"></div>
+    </div>
+
+    <script>
+        class TrainTracker {
+            constructor() {
+                this.map = null;
+                this.stationsData = [];
+                this.linesData = null;
+                this.trainMarkers = new Map();
+                this.stationMarkers = [];
+                this.updateInterval = null;
+
+                this.init();
+            }
+
+            async init() {
+                await this.initMap();
+                await this.loadDefaultData();
+                this.setupControls();
+                this.startTrainUpdates();
+            }
+
+            async initMap() {
+                this.map = new google.maps.Map(document.getElementById('map'), {
+                    zoom: 6,
+                    center: { lat: 54.5, lng: -2.5 }, // 英国中心
+                    mapTypeId: 'roadmap'
+                });
+            }
+
+            async loadDefaultData() {
+                try {
+                    // 加载默认车站数据
+                    const stationsResponse = await fetch('./stations.json');
+                    this.stationsData = await stationsResponse.json();
+
+                    // 加载默认线路数据
+                    const linesResponse = await fetch('./hotosm_gbr_railways_lines_geojson.geojson');
+                    this.linesData = await linesResponse.json();
+
+                    this.renderAll();
+                    this.showStatus('默认数据加载成功', 'success');
+                } catch (error) {
+                    console.error('加载默认数据失败:', error);
+                    this.showStatus('加载默认数据失败: ' + error.message, 'error');
+                }
+            }
+
+            renderAll() {
+                this.renderStations();
+                this.renderLines();
+            }
+
+            renderStations() {
+                // 清除现有车站标记
+                this.stationMarkers.forEach(marker => marker.setMap(null));
+                this.stationMarkers = [];
+
+                if (!document.getElementById('showStations').checked) return;
+
+                this.stationsData.forEach(station => {
+                    const marker = new google.maps.Marker({
+                        position: { lat: station.lat, lng: station.long || station.lon },
+                        map: this.map,
+                        title: station.stationName,
+                        icon: {
+                            url: 'data:image/svg+xml;charset=UTF-8,' + encodeURIComponent(`
+                                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
+                                    <text x="12" y="18" text-anchor="middle" font-size="20">🚉</text>
+                                </svg>
+                            `),
+                            scaledSize: new google.maps.Size(24, 24),
+                            anchor: new google.maps.Point(12, 12)
+                        }
+                    });
+
+                    const infoWindow = new google.maps.InfoWindow({
+                        content: `
+                            <div>
+                                <h4>${station.stationName}</h4>
+                                <p>代码: ${station.crsCode || 'N/A'}</p>
+                                <p>位置: ${station.lat.toFixed(4)}, ${(station.long || station.lon).toFixed(4)}</p>
+                            </div>
+                        `
+                    });
+
+                    marker.addListener('click', () => {
+                        infoWindow.open(this.map, marker);
+                    });
+
+                    this.stationMarkers.push(marker);
+                });
+            }
+
+            renderLines() {
+                if (!document.getElementById('showLines').checked) {
+                    this.map.data.forEach(feature => {
+                        this.map.data.remove(feature);
+                    });
+                    return;
+                }
+
+                if (this.linesData) {
+                    this.map.data.addGeoJson(this.linesData);
+
+                    this.map.data.setStyle({
+                        strokeColor: '#000000',
+                        strokeOpacity: 0.8,
+                        strokeWeight: 2
+                    });
+
+                    // 自动缩放到线路范围
+                    const bounds = new google.maps.LatLngBounds();
+                    this.map.data.forEach(feature => {
+                        feature.getGeometry().forEachLatLng(latLng => {
+                            bounds.extend(latLng);
+                        });
+                    });
+                    this.map.fitBounds(bounds);
+                }
+            }
+
+            async renderTrains() {
+                if (!document.getElementById('showTrains').checked) {
+                    this.trainMarkers.forEach(marker => marker.setMap(null));
+                    this.trainMarkers.clear();
+                    return;
+                }
+
+                try {
+                    const response = await fetch('http://localhost:8000/positions?limit=500&max_age_minutes=1440');
+                    const trainsData = await response.json();
+
+                    // 获取当前存在的火车ID
+                    const currentTrainIds = new Set(trainsData.map(train => train.rid || train.uid));
+
+                    // 移除不再存在的火车标记
+                    this.trainMarkers.forEach((marker, trainId) => {
+                        if (!currentTrainIds.has(trainId)) {
+                            marker.setMap(null);
+                            this.trainMarkers.delete(trainId);
+                        }
+                    });
+
+                    // 更新或创建火车标记
+                    trainsData.forEach(train => {
+                        const trainId = train.rid || train.uid;
+                        const position = { lat: train.lat, lng: train.lon || train.lng };
+
+                        // 将火车位置对齐到最近的线路
+                        const snappedPosition = this.snapToNearestLine(position);
+                        const bearing = this.calculateBearing(position, snappedPosition);
+
+                        if (this.trainMarkers.has(trainId)) {
+                            // 更新现有标记
+                            const marker = this.trainMarkers.get(trainId);
+                            marker.setPosition(snappedPosition);
+                            marker.setIcon(this.createTrainIcon(bearing));
+                        } else {
+                            // 创建新标记
+                            const marker = new google.maps.Marker({
+                                position: snappedPosition,
+                                map: this.map,
+                                title: `火车 ${trainId}`,
+                                icon: this.createTrainIcon(bearing)
+                            });
+
+                            const infoWindow = new google.maps.InfoWindow({
+                                content: `
+                                    <div>
+                                        <h4>🚂 火车 ${trainId}</h4>
+                                        <p>状态: ${train.state || 'N/A'}</p>
+                                        <p>位置: ${train.lat.toFixed(4)}, ${(train.lon || train.lng).toFixed(4)}</p>
+                                    </div>
+                                `
+                            });
+
+                            marker.addListener('click', () => {
+                                infoWindow.open(this.map, marker);
+                            });
+
+                            this.trainMarkers.set(trainId, marker);
+                        }
+                    });
+
+                } catch (error) {
+                    console.error('获取火车位置失败:', error);
+                    // 如果API不可用，显示模拟数据
+                    this.renderMockTrains();
+                }
+            }
+
+            renderMockTrains() {
+                // 模拟一些火车数据用于演示
+                const mockTrains = [
+                    { rid: 'MOCK001', lat: 51.5074, lng: -0.1278, state: 'running' },
+                    { rid: 'MOCK002', lat: 53.4808, lng: -2.2426, state: 'stopped' },
+                    { rid: 'MOCK003', lat: 55.9533, lng: -3.1883, state: 'running' }
+                ];
+
+                mockTrains.forEach(train => {
+                    const trainId = train.rid;
+                    const position = { lat: train.lat, lng: train.lng };
+                    const snappedPosition = this.snapToNearestLine(position);
+                    const bearing = Math.random() * 360; // 随机方向
+
+                    if (!this.trainMarkers.has(trainId)) {
+                        const marker = new google.maps.Marker({
+                            position: snappedPosition,
+                            map: this.map,
+                            title: `火车 ${trainId}`,
+                            icon: this.createTrainIcon(bearing)
+                        });
+
+                        this.trainMarkers.set(trainId, marker);
+                    }
+                });
+            }
+
+            createTrainIcon(bearing = 0) {
+                return {
+                    path: 'M 0,-20 L 15,0 L 0,20 L -15,0 Z', // 箭头形状
+                    fillColor: '#d32f2f',
+                    fillOpacity: 1,
+                    strokeColor: '#b71c1c',
+                    strokeWeight: 2,
+                    scale: 0.8,
+                    rotation: bearing,
+                    anchor: new google.maps.Point(0, 0)
+                };
+            }
+
+            snapToNearestLine(position) {
+                // 简化的对齐算法 - 在实际应用中需要更复杂的几何计算
+                let nearestPoint = position;
+                let minDistance = Infinity;
+
+                if (this.linesData && this.linesData.features) {
+                    this.linesData.features.forEach(feature => {
+                        if (feature.geometry.type === 'LineString') {
+                            const coordinates = feature.geometry.coordinates;
+                            for (let i = 0; i < coordinates.length - 1; i++) {
+                                const segmentStart = { lat: coordinates[i][1], lng: coordinates[i][0] };
+                                const segmentEnd = { lat: coordinates[i + 1][1], lng: coordinates[i + 1][0] };
+
+                                const closestPoint = this.getClosestPointOnSegment(position, segmentStart, segmentEnd);
+                                const distance = this.calculateDistance(position, closestPoint);
+
+                                if (distance < minDistance) {
+                                    minDistance = distance;
+                                    nearestPoint = closestPoint;
+                                }
+                            }
+                        }
+                    });
+                }
+
+                return nearestPoint;
+            }
+
+            getClosestPointOnSegment(point, segmentStart, segmentEnd) {
+                // 计算点到线段的最近点
+                const A = point.lat - segmentStart.lat;
+                const B = point.lng - segmentStart.lng;
+                const C = segmentEnd.lat - segmentStart.lat;
+                const D = segmentEnd.lng - segmentStart.lng;
+
+                const dot = A * C + B * D;
+                const lenSq = C * C + D * D;
+
+                if (lenSq === 0) return segmentStart;
+
+                let param = dot / lenSq;
+                param = Math.max(0, Math.min(1, param));
+
+                return {
+                    lat: segmentStart.lat + param * C,
+                    lng: segmentStart.lng + param * D
+                };
+            }
+
+            calculateDistance(pos1, pos2) {
+                const R = 6371; // 地球半径（公里）
+                const dLat = (pos2.lat - pos1.lat) * Math.PI / 180;
+                const dLng = (pos2.lng - pos1.lng) * Math.PI / 180;
+                const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+                    Math.cos(pos1.lat * Math.PI / 180) * Math.cos(pos2.lat * Math.PI / 180) *
+                    Math.sin(dLng / 2) * Math.sin(dLng / 2);
+                const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+                return R * c;
+            }
+
+            calculateBearing(from, to) {
+                const dLng = (to.lng - from.lng) * Math.PI / 180;
+                const lat1 = from.lat * Math.PI / 180;
+                const lat2 = to.lat * Math.PI / 180;
+
+                const y = Math.sin(dLng) * Math.cos(lat2);
+                const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLng);
+
+                return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+            }
+
+            setupControls() {
+                // 复选框控制
+                document.getElementById('showStations').addEventListener('change', () => {
+                    this.renderStations();
+                });
+
+                document.getElementById('showTrains').addEventListener('change', () => {
+                    this.renderTrains();
+                });
+
+                document.getElementById('showLines').addEventListener('change', () => {
+                    this.renderLines();
+                });
+
+                // 文件上传
+                document.getElementById('stationsFile').addEventListener('change', (e) => {
+                    this.handleFileUpload(e.target.files[0], 'stations');
+                });
+
+                document.getElementById('linesFile').addEventListener('change', (e) => {
+                    this.handleFileUpload(e.target.files[0], 'lines');
+                });
+
+                // 拖拽上传
+                const dropZone = document.getElementById('dropZone');
+                dropZone.addEventListener('dragover', (e) => {
+                    e.preventDefault();
+                    dropZone.classList.add('dragover');
+                });
+
+                dropZone.addEventListener('dragleave', () => {
+                    dropZone.classList.remove('dragover');
+                });
+
+                dropZone.addEventListener('drop', (e) => {
+                    e.preventDefault();
+                    dropZone.classList.remove('dragover');
+                    const files = e.dataTransfer.files;
+                    if (files.length > 0) {
+                        this.handleFileUpload(files[0], this.detectFileType(files[0].name));
+                    }
+                });
+            }
+
+            detectFileType(filename) {
+                if (filename.includes('station')) return 'stations';
+                if (filename.includes('railway') || filename.includes('line') || filename.endsWith('.geojson')) return 'lines';
+                return 'unknown';
+            }
+
+            async handleFileUpload(file, type) {
+                if (!file) return;
+
+                try {
+                    const text = await file.text();
+                    const data = JSON.parse(text);
+
+                    if (type === 'stations') {
+                        this.stationsData = data;
+                        this.renderStations();
+                        this.showStatus('车站数据上传成功', 'success');
+                    } else if (type === 'lines') {
+                        this.linesData = data;
+                        this.renderLines();
+                        this.showStatus('线路数据上传成功', 'success');
+                    } else {
+                        this.showStatus('无法识别文件类型', 'error');
+                    }
+                } catch (error) {
+                    this.showStatus('文件解析失败: ' + error.message, 'error');
+                }
+            }
+
+            showStatus(message, type) {
+                const status = document.getElementById('status');
+                status.textContent = message;
+                status.className = `status ${type}`;
+                status.style.display = 'block';
+
+                setTimeout(() => {
+                    status.style.display = 'none';
+                }, 3000);
+            }
+
+            startTrainUpdates() {
+                // 立即更新一次
+                this.renderTrains();
+
+                // 每2秒更新一次
+                this.updateInterval = setInterval(() => {
+                    this.renderTrains();
+                }, 2000);
+            }
+
+            destroy() {
+                if (this.updateInterval) {
+                    clearInterval(this.updateInterval);
+                }
+            }
+        }
+
+        // 初始化应用
+        let trainTracker;
+
+        function initMap() {
+            trainTracker = new TrainTracker();
+        }
+
+        // 页面卸载时清理
+        window.addEventListener('beforeunload', () => {
+            if (trainTracker) {
+                trainTracker.destroy();
+            }
+        });
+    </script>
+
+    <!-- 动态加载Google Maps API -->
+    <script>
+        // 从配置API获取Google Maps API密钥并动态加载
+        async function loadGoogleMapsAPI() {
+            try {
+                const response = await fetch('http://localhost:8000/config');
+                const config = await response.json();
+                const apiKey = config.google_maps_api_key;
+
+                if (apiKey && apiKey !== 'YOUR_API_KEY') {
+                    const script = document.createElement('script');
+                    script.src = `https://maps.googleapis.com/maps/api/js?key=${apiKey}&callback=initMap`;
+                    script.async = true;
+                    script.defer = true;
+                    document.head.appendChild(script);
+                } else {
+                    console.warn('Google Maps API密钥未配置，请在.env文件中设置GOOGLE_MAPS_API_KEY');
+                    document.body.innerHTML = `
+                        <div style="padding: 20px; text-align: center; font-family: Arial, sans-serif;">
+                            <h2>⚠️ Google Maps API密钥未配置</h2>
+                            <p>请在.env文件中设置GOOGLE_MAPS_API_KEY变量</p>
+                            <p>或者使用 <a href="/templates/leaflet_enhanced.html">Leaflet版本</a> (无需API密钥)</p>
+                        </div>
+                    `;
+                }
+            } catch (error) {
+                console.error('加载配置失败:', error);
+                document.body.innerHTML = `
+                    <div style="padding: 20px; text-align: center; font-family: Arial, sans-serif;">
+                        <h2>❌ 无法连接到API服务器</h2>
+                        <p>请确保API服务器正在运行 (http://localhost:8000)</p>
+                        <p>或者使用 <a href="/templates/leaflet_enhanced.html">Leaflet版本</a></p>
+                    </div>
+                `;
+            }
+        }
+
+        // 页面加载完成后加载Google Maps API
+        document.addEventListener('DOMContentLoaded', loadGoogleMapsAPI);
+    </script>
+</body>
+
+</html>

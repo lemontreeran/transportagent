@@ -1,0 +1,768 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>高性能火车实时追踪 - 借鉴SignalBox.io</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #1a1a1a;
+            color: #ffffff;
+            overflow: hidden;
+        }
+        
+        #mapContainer {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+        }
+        
+        #map {
+            width: 100%;
+            height: 100%;
+        }
+        
+        .control-panel {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            background: rgba(26, 26, 26, 0.95);
+            backdrop-filter: blur(10px);
+            padding: 20px;
+            border-radius: 12px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            min-width: 280px;
+            max-width: 350px;
+            z-index: 1000;
+        }
+        
+        .control-panel h3 {
+            color: #00ff88;
+            margin-bottom: 15px;
+            font-size: 16px;
+            font-weight: 600;
+        }
+        
+        .stats-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+        
+        .stat-item {
+            background: rgba(255, 255, 255, 0.05);
+            padding: 10px;
+            border-radius: 6px;
+            text-align: center;
+        }
+        
+        .stat-value {
+            font-size: 24px;
+            font-weight: bold;
+            color: #00ff88;
+        }
+        
+        .stat-label {
+            font-size: 12px;
+            color: #cccccc;
+            margin-top: 4px;
+        }
+        
+        .connection-status {
+            display: flex;
+            align-items: center;
+            margin-bottom: 15px;
+            padding: 8px 12px;
+            border-radius: 6px;
+            font-size: 14px;
+        }
+        
+        .connection-status.connected {
+            background: rgba(0, 255, 136, 0.1);
+            color: #00ff88;
+        }
+        
+        .connection-status.disconnected {
+            background: rgba(255, 68, 68, 0.1);
+            color: #ff4444;
+        }
+        
+        .connection-status.connecting {
+            background: rgba(255, 193, 7, 0.1);
+            color: #ffc107;
+        }
+        
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            margin-right: 8px;
+            animation: pulse 2s infinite;
+        }
+        
+        .connected .status-dot {
+            background: #00ff88;
+        }
+        
+        .disconnected .status-dot {
+            background: #ff4444;
+        }
+        
+        .connecting .status-dot {
+            background: #ffc107;
+        }
+        
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.5; }
+            100% { opacity: 1; }
+        }
+        
+        .controls {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        
+        .control-group {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+        
+        .control-group label {
+            font-size: 14px;
+            color: #cccccc;
+        }
+        
+        .switch {
+            position: relative;
+            width: 50px;
+            height: 24px;
+        }
+        
+        .switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+        
+        .slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: rgba(255, 255, 255, 0.2);
+            transition: .4s;
+            border-radius: 24px;
+        }
+        
+        .slider:before {
+            position: absolute;
+            content: "";
+            height: 18px;
+            width: 18px;
+            left: 3px;
+            bottom: 3px;
+            background-color: white;
+            transition: .4s;
+            border-radius: 50%;
+        }
+        
+        input:checked + .slider {
+            background-color: #00ff88;
+        }
+        
+        input:checked + .slider:before {
+            transform: translateX(26px);
+        }
+        
+        .performance-info {
+            margin-top: 15px;
+            padding: 10px;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 6px;
+            font-size: 12px;
+        }
+        
+        .performance-info div {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 4px;
+        }
+        
+        .train-marker {
+            position: absolute;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            transform: translate(-50%, -50%);
+            transition: all 0.3s ease;
+            z-index: 100;
+        }
+        
+        .train-marker.enroute {
+            background: #00ff88;
+            box-shadow: 0 0 10px rgba(0, 255, 136, 0.5);
+        }
+        
+        .train-marker.dwell {
+            background: #ffc107;
+            box-shadow: 0 0 10px rgba(255, 193, 7, 0.5);
+        }
+        
+        .train-marker.stopped {
+            background: #ff4444;
+            box-shadow: 0 0 10px rgba(255, 68, 68, 0.5);
+        }
+        
+        .train-info {
+            position: absolute;
+            background: rgba(0, 0, 0, 0.8);
+            color: white;
+            padding: 8px 12px;
+            border-radius: 6px;
+            font-size: 12px;
+            pointer-events: none;
+            z-index: 1001;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div id="mapContainer">
+        <div id="map"></div>
+        
+        <div class="control-panel">
+            <h3>🚄 实时火车追踪</h3>
+            
+            <div id="connectionStatus" class="connection-status connecting">
+                <div class="status-dot"></div>
+                <span>正在连接...</span>
+            </div>
+            
+            <div class="stats-grid">
+                <div class="stat-item">
+                    <div class="stat-value" id="totalTrains">0</div>
+                    <div class="stat-label">总火车数</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-value" id="activeTrains">0</div>
+                    <div class="stat-label">活跃火车</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-value" id="updateRate">0</div>
+                    <div class="stat-label">更新/秒</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-value" id="latency">0ms</div>
+                    <div class="stat-label">延迟</div>
+                </div>
+            </div>
+            
+            <div class="controls">
+                <div class="control-group">
+                    <label>显示火车</label>
+                    <label class="switch">
+                        <input type="checkbox" id="showTrains" checked>
+                        <span class="slider"></span>
+                    </label>
+                </div>
+                <div class="control-group">
+                    <label>显示轨迹</label>
+                    <label class="switch">
+                        <input type="checkbox" id="showTrails">
+                        <span class="slider"></span>
+                    </label>
+                </div>
+                <div class="control-group">
+                    <label>高性能模式</label>
+                    <label class="switch">
+                        <input type="checkbox" id="highPerformance" checked>
+                        <span class="slider"></span>
+                    </label>
+                </div>
+            </div>
+            
+            <div class="performance-info">
+                <div><span>FPS:</span><span id="fps">60</span></div>
+                <div><span>渲染时间:</span><span id="renderTime">0ms</span></div>
+                <div><span>内存使用:</span><span id="memoryUsage">0MB</span></div>
+            </div>
+        </div>
+        
+        <div id="trainInfo" class="train-info"></div>
+    </div>
+
+    <script>
+        class HighPerformanceTrainTracker {
+            constructor() {
+                this.map = null;
+                this.ws = null;
+                this.trains = new Map();
+                this.trainMarkers = new Map();
+                this.isHighPerformance = true;
+                
+                // 性能监控
+                this.stats = {
+                    totalTrains: 0,
+                    activeTrains: 0,
+                    updateRate: 0,
+                    latency: 0,
+                    fps: 0,
+                    renderTime: 0
+                };
+                
+                this.updateCount = 0;
+                this.lastUpdateTime = Date.now();
+                this.frameCount = 0;
+                this.lastFrameTime = Date.now();
+                
+                this.init();
+            }
+            
+            async init() {
+                await this.initMap();
+                this.setupControls();
+                this.connectWebSocket();
+                this.startPerformanceMonitoring();
+                this.startStatsUpdate();
+            }
+            
+            async initMap() {
+                this.map = new google.maps.Map(document.getElementById('map'), {
+                    zoom: 6,
+                    center: { lat: 54.5, lng: -2.5 },
+                    mapTypeId: 'roadmap',
+                    styles: [
+                        {
+                            elementType: 'geometry',
+                            stylers: [{ color: '#212121' }]
+                        },
+                        {
+                            elementType: 'labels.icon',
+                            stylers: [{ visibility: 'off' }]
+                        },
+                        {
+                            elementType: 'labels.text.fill',
+                            stylers: [{ color: '#757575' }]
+                        },
+                        {
+                            elementType: 'labels.text.stroke',
+                            stylers: [{ color: '#212121' }]
+                        },
+                        {
+                            featureType: 'administrative',
+                            elementType: 'geometry',
+                            stylers: [{ color: '#757575' }]
+                        },
+                        {
+                            featureType: 'road',
+                            elementType: 'geometry.fill',
+                            stylers: [{ color: '#2c2c2c' }]
+                        },
+                        {
+                            featureType: 'water',
+                            elementType: 'geometry',
+                            stylers: [{ color: '#000000' }]
+                        }
+                    ],
+                    disableDefaultUI: true,
+                    zoomControl: true,
+                    mapTypeControl: false,
+                    streetViewControl: false,
+                    fullscreenControl: true
+                });
+            }
+            
+            connectWebSocket() {
+                const wsUrl = 'ws://localhost:8002';
+                
+                try {
+                    this.ws = new WebSocket(wsUrl);
+                    
+                    this.ws.onopen = () => {
+                        console.log('WebSocket连接已建立');
+                        this.updateConnectionStatus('connected', '已连接');
+                    };
+                    
+                    this.ws.onmessage = (event) => {
+                        this.handleWebSocketMessage(event.data);
+                    };
+                    
+                    this.ws.onclose = () => {
+                        console.log('WebSocket连接已关闭');
+                        this.updateConnectionStatus('disconnected', '连接断开');
+                        // 5秒后重连
+                        setTimeout(() => this.connectWebSocket(), 5000);
+                    };
+                    
+                    this.ws.onerror = (error) => {
+                        console.error('WebSocket错误:', error);
+                        this.updateConnectionStatus('disconnected', '连接错误');
+                    };
+                    
+                } catch (error) {
+                    console.error('WebSocket连接失败:', error);
+                    this.updateConnectionStatus('disconnected', '连接失败');
+                    // 回退到HTTP轮询
+                    this.startHttpPolling();
+                }
+            }
+            
+            async handleWebSocketMessage(data) {
+                const startTime = performance.now();
+                
+                try {
+                    const message = JSON.parse(data);
+                    
+                    if (message.type === 'initial') {
+                        this.handleInitialData(message.data);
+                    } else if (message.type === 'delta') {
+                        this.handleDeltaUpdate(message.changes);
+                    }
+                    
+                    this.updateCount++;
+                    this.stats.renderTime = performance.now() - startTime;
+                    
+                } catch (error) {
+                    console.error('处理WebSocket消息失败:', error);
+                }
+            }
+            
+            handleInitialData(trains) {
+                console.log(`接收到初始数据: ${trains.length} 个火车`);
+                
+                // 清除现有标记
+                this.clearAllMarkers();
+                
+                // 添加所有火车
+                trains.forEach(train => {
+                    this.trains.set(train.rid, train);
+                    if (document.getElementById('showTrains').checked) {
+                        this.addTrainMarker(train);
+                    }
+                });
+                
+                this.stats.totalTrains = trains.length;
+                this.stats.activeTrains = trains.filter(t => t.state === 'enroute').length;
+            }
+            
+            handleDeltaUpdate(changes) {
+                // 处理新增的火车
+                changes.added.forEach(train => {
+                    this.trains.set(train.rid, train);
+                    if (document.getElementById('showTrains').checked) {
+                        this.addTrainMarker(train);
+                    }
+                });
+                
+                // 处理更新的火车
+                changes.updated.forEach(train => {
+                    this.trains.set(train.rid, train);
+                    this.updateTrainMarker(train);
+                });
+                
+                // 处理移除的火车
+                changes.removed.forEach(rid => {
+                    this.trains.delete(rid);
+                    this.removeTrainMarker(rid);
+                });
+                
+                // 更新统计
+                this.stats.totalTrains = this.trains.size;
+                this.stats.activeTrains = Array.from(this.trains.values())
+                    .filter(t => t.state === 'enroute').length;
+            }
+            
+            addTrainMarker(train) {
+                if (this.isHighPerformance) {
+                    this.addHighPerformanceMarker(train);
+                } else {
+                    this.addStandardMarker(train);
+                }
+            }
+            
+            addHighPerformanceMarker(train) {
+                // 使用轻量级DOM元素而不是Google Maps Marker
+                const marker = document.createElement('div');
+                marker.className = `train-marker ${train.state}`;
+                marker.style.position = 'absolute';
+                marker.style.zIndex = '100';
+                
+                // 计算屏幕坐标
+                const position = new google.maps.LatLng(train.lat, train.lon);
+                const projection = this.map.getProjection();
+                if (projection) {
+                    const point = projection.fromLatLngToPoint(position);
+                    const scale = Math.pow(2, this.map.getZoom());
+                    const worldPoint = new google.maps.Point(
+                        point.x * scale,
+                        point.y * scale
+                    );
+                    
+                    marker.style.left = worldPoint.x + 'px';
+                    marker.style.top = worldPoint.y + 'px';
+                }
+                
+                // 添加点击事件
+                marker.addEventListener('click', () => {
+                    this.showTrainInfo(train, marker);
+                });
+                
+                document.getElementById('map').appendChild(marker);
+                this.trainMarkers.set(train.rid, marker);
+            }
+            
+            addStandardMarker(train) {
+                const marker = new google.maps.Marker({
+                    position: { lat: train.lat, lng: train.lon },
+                    map: this.map,
+                    title: `火车 ${train.rid}`,
+                    icon: {
+                        path: google.maps.SymbolPath.CIRCLE,
+                        scale: 4,
+                        fillColor: this.getStateColor(train.state),
+                        fillOpacity: 1,
+                        strokeColor: '#ffffff',
+                        strokeWeight: 1
+                    }
+                });
+                
+                marker.addListener('click', () => {
+                    this.showTrainInfo(train, marker);
+                });
+                
+                this.trainMarkers.set(train.rid, marker);
+            }
+            
+            updateTrainMarker(train) {
+                const marker = this.trainMarkers.get(train.rid);
+                if (!marker) return;
+                
+                if (this.isHighPerformance) {
+                    // 更新DOM元素位置
+                    const position = new google.maps.LatLng(train.lat, train.lon);
+                    const projection = this.map.getProjection();
+                    if (projection) {
+                        const point = projection.fromLatLngToPoint(position);
+                        const scale = Math.pow(2, this.map.getZoom());
+                        const worldPoint = new google.maps.Point(
+                            point.x * scale,
+                            point.y * scale
+                        );
+                        
+                        marker.style.left = worldPoint.x + 'px';
+                        marker.style.top = worldPoint.y + 'px';
+                        marker.className = `train-marker ${train.state}`;
+                    }
+                } else {
+                    // 更新Google Maps Marker
+                    marker.setPosition({ lat: train.lat, lng: train.lon });
+                    marker.setIcon({
+                        path: google.maps.SymbolPath.CIRCLE,
+                        scale: 4,
+                        fillColor: this.getStateColor(train.state),
+                        fillOpacity: 1,
+                        strokeColor: '#ffffff',
+                        strokeWeight: 1
+                    });
+                }
+            }
+            
+            removeTrainMarker(rid) {
+                const marker = this.trainMarkers.get(rid);
+                if (marker) {
+                    if (this.isHighPerformance) {
+                        marker.remove();
+                    } else {
+                        marker.setMap(null);
+                    }
+                    this.trainMarkers.delete(rid);
+                }
+            }
+            
+            clearAllMarkers() {
+                this.trainMarkers.forEach((marker, rid) => {
+                    this.removeTrainMarker(rid);
+                });
+            }
+            
+            getStateColor(state) {
+                switch (state) {
+                    case 'enroute': return '#00ff88';
+                    case 'dwell': return '#ffc107';
+                    case 'stopped': return '#ff4444';
+                    default: return '#cccccc';
+                }
+            }
+            
+            showTrainInfo(train, marker) {
+                const infoDiv = document.getElementById('trainInfo');
+                infoDiv.innerHTML = `
+                    <strong>火车 ${train.rid}</strong><br>
+                    状态: ${train.state}<br>
+                    位置: ${train.lat.toFixed(4)}, ${train.lon.toFixed(4)}<br>
+                    ${train.from_tpl ? `从: ${train.from_tpl}` : ''}<br>
+                    ${train.to_tpl ? `到: ${train.to_tpl}` : ''}<br>
+                    ${train.platform ? `站台: ${train.platform}` : ''}
+                `;
+                
+                // 定位信息框
+                const rect = marker.getBoundingClientRect();
+                infoDiv.style.left = (rect.left + 20) + 'px';
+                infoDiv.style.top = (rect.top - 10) + 'px';
+                infoDiv.style.display = 'block';
+                
+                // 3秒后隐藏
+                setTimeout(() => {
+                    infoDiv.style.display = 'none';
+                }, 3000);
+            }
+            
+            updateConnectionStatus(status, message) {
+                const statusDiv = document.getElementById('connectionStatus');
+                statusDiv.className = `connection-status ${status}`;
+                statusDiv.querySelector('span').textContent = message;
+            }
+            
+            setupControls() {
+                document.getElementById('showTrains').addEventListener('change', (e) => {
+                    if (e.target.checked) {
+                        this.trains.forEach(train => this.addTrainMarker(train));
+                    } else {
+                        this.clearAllMarkers();
+                    }
+                });
+                
+                document.getElementById('highPerformance').addEventListener('change', (e) => {
+                    this.isHighPerformance = e.target.checked;
+                    // 重新渲染所有标记
+                    this.clearAllMarkers();
+                    if (document.getElementById('showTrains').checked) {
+                        this.trains.forEach(train => this.addTrainMarker(train));
+                    }
+                });
+            }
+            
+            startPerformanceMonitoring() {
+                setInterval(() => {
+                    // 计算FPS
+                    const now = Date.now();
+                    this.frameCount++;
+                    if (now - this.lastFrameTime >= 1000) {
+                        this.stats.fps = Math.round(this.frameCount * 1000 / (now - this.lastFrameTime));
+                        this.frameCount = 0;
+                        this.lastFrameTime = now;
+                    }
+                    
+                    // 计算更新率
+                    if (now - this.lastUpdateTime >= 1000) {
+                        this.stats.updateRate = this.updateCount;
+                        this.updateCount = 0;
+                        this.lastUpdateTime = now;
+                    }
+                    
+                    // 估算内存使用
+                    if (performance.memory) {
+                        this.stats.memoryUsage = Math.round(performance.memory.usedJSHeapSize / 1024 / 1024);
+                    }
+                }, 100);
+            }
+            
+            startStatsUpdate() {
+                setInterval(() => {
+                    document.getElementById('totalTrains').textContent = this.stats.totalTrains;
+                    document.getElementById('activeTrains').textContent = this.stats.activeTrains;
+                    document.getElementById('updateRate').textContent = this.stats.updateRate;
+                    document.getElementById('latency').textContent = this.stats.latency + 'ms';
+                    document.getElementById('fps').textContent = this.stats.fps;
+                    document.getElementById('renderTime').textContent = Math.round(this.stats.renderTime) + 'ms';
+                    document.getElementById('memoryUsage').textContent = this.stats.memoryUsage + 'MB';
+                }, 1000);
+            }
+            
+            startHttpPolling() {
+                console.log('启动HTTP轮询作为WebSocket的回退方案');
+                setInterval(async () => {
+                    try {
+                        const response = await fetch('http://localhost:8000/positions?limit=1000');
+                        const trains = await response.json();
+                        this.handleInitialData(trains);
+                    } catch (error) {
+                        console.error('HTTP轮询失败:', error);
+                    }
+                }, 5000);
+            }
+        }
+        
+        // 初始化应用
+        let tracker;
+        
+        function initMap() {
+            tracker = new HighPerformanceTrainTracker();
+        }
+        
+        // 页面卸载时清理
+        window.addEventListener('beforeunload', () => {
+            if (tracker && tracker.ws) {
+                tracker.ws.close();
+            }
+        });
+    </script>
+    
+    <!-- Pako for gzip decompression -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pako/2.0.4/pako.min.js"></script>
+    
+    <!-- 动态加载Google Maps API -->
+    <script>
+        // 从配置API获取Google Maps API密钥并动态加载
+        async function loadGoogleMapsAPI() {
+            try {
+                const response = await fetch('http://localhost:8000/config');
+                const config = await response.json();
+                const apiKey = config.google_maps_api_key;
+                
+                if (apiKey && apiKey !== 'YOUR_API_KEY') {
+                    const script = document.createElement('script');
+                    script.src = `https://maps.googleapis.com/maps/api/js?key=${apiKey}&callback=initMap`;
+                    script.async = true;
+                    script.defer = true;
+                    document.head.appendChild(script);
+                } else {
+                    console.warn('Google Maps API密钥未配置，请在.env文件中设置GOOGLE_MAPS_API_KEY');
+                    document.body.innerHTML = `
+                        <div style="padding: 20px; text-align: center; font-family: Arial, sans-serif;">
+                            <h2>⚠️ Google Maps API密钥未配置</h2>
+                            <p>请在.env文件中设置GOOGLE_MAPS_API_KEY变量</p>
+                            <p>或者使用 <a href="/templates/leaflet_enhanced.html">Leaflet版本</a> (无需API密钥)</p>
+                        </div>
+                    `;
+                }
+            } catch (error) {
+                console.error('加载配置失败:', error);
+                document.body.innerHTML = `
+                    <div style="padding: 20px; text-align: center; font-family: Arial, sans-serif;">
+                        <h2>❌ 无法连接到API服务器</h2>
+                        <p>请确保API服务器正在运行 (http://localhost:8000)</p>
+                        <p>或者使用 <a href="/templates/leaflet_enhanced.html">Leaflet版本</a></p>
+                    </div>
+                `;
+            }
+        }
+        
+        // 页面加载完成后加载Google Maps API
+        document.addEventListener('DOMContentLoaded', loadGoogleMapsAPI);
+    </script>
+</body>
+</html>

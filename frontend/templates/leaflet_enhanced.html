@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>火车实时追踪系统 - Leaflet版</title>
+    
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+
+        #map {
+            height: 100vh;
+            width: 100%;
+        }
+
+        .control-panel {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            background: white;
+            padding: 20px;
+            border-radius: 12px;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+            z-index: 1000;
+            min-width: 280px;
+            max-width: 350px;
+        }
+
+        .control-panel h3 {
+            margin: 0 0 15px 0;
+            color: #333;
+            font-size: 18px;
+            font-weight: 600;
+        }
+
+        .checkbox-group {
+            margin-bottom: 20px;
+        }
+
+        .checkbox-item {
+            display: flex;
+            align-items: center;
+            margin-bottom: 12px;
+            padding: 8px;
+            border-radius: 6px;
+            transition: background-color 0.2s;
+        }
+
+        .checkbox-item:hover {
+            background-color: #f8f9fa;
+        }
+
+        .checkbox-item input[type="checkbox"] {
+            margin-right: 10px;
+            transform: scale(1.2);
+        }
+
+        .checkbox-item label {
+            cursor: pointer;
+            font-weight: 500;
+            color: #555;
+        }
+
+        .status-info {
+            background: #e8f5e8;
+            border: 1px solid #4caf50;
+            padding: 12px;
+            border-radius: 6px;
+            margin-bottom: 15px;
+            font-size: 14px;
+        }
+
+        .error-info {
+            background: #ffe8e8;
+            border: 1px solid #f44336;
+            padding: 12px;
+            border-radius: 6px;
+            margin-bottom: 15px;
+            font-size: 14px;
+        }
+
+        .train-marker {
+            background: #2196F3;
+            border: 2px solid white;
+            border-radius: 50%;
+            width: 12px;
+            height: 12px;
+        }
+
+        .station-marker {
+            background: #FF9800;
+            border: 2px solid white;
+            border-radius: 50%;
+            width: 8px;
+            height: 8px;
+        }
+    </style>
+</head>
+<body>
+    <div id="map"></div>
+    
+    <div class="control-panel">
+        <h3>🚂 火车追踪控制台</h3>
+        
+        <div id="status" class="status-info">
+            正在连接服务器...
+        </div>
+        
+        <div class="checkbox-group">
+            <div class="checkbox-item">
+                <input type="checkbox" id="showTrains" checked>
+                <label for="showTrains">显示火车位置</label>
+            </div>
+            <div class="checkbox-item">
+                <input type="checkbox" id="showStations">
+                <label for="showStations">显示车站</label>
+            </div>
+            <div class="checkbox-item">
+                <input type="checkbox" id="showRailways">
+                <label for="showRailways">显示铁路线</label>
+            </div>
+        </div>
+        
+        <div id="trainCount" style="font-size: 14px; color: #666;">
+            火车数量: 0
+        </div>
+    </div>
+
+    <!-- Leaflet JavaScript -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    
+    <script>
+        class TrainTracker {
+            constructor() {
+                this.map = null;
+                this.trainMarkers = new Map();
+                this.stationMarkers = [];
+                this.railwayLayer = null;
+                this.websocket = null;
+                this.reconnectAttempts = 0;
+                this.maxReconnectAttempts = 5;
+                
+                this.init();
+            }
+            
+            async init() {
+                this.initMap();
+                this.setupEventListeners();
+                this.connectWebSocket();
+                await this.loadStations();
+                await this.loadRailways();
+            }
+            
+            initMap() {
+                // 初始化Leaflet地图
+                this.map = L.map('map').setView([54.5, -2.5], 6);
+                
+                // 添加OpenStreetMap瓦片层
+                L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                    attribution: '© OpenStreetMap contributors',
+                    maxZoom: 18
+                }).addTo(this.map);
+                
+                console.log('地图初始化完成');
+            }
+            
+            setupEventListeners() {
+                document.getElementById('showTrains').addEventListener('change', (e) => {
+                    this.toggleTrains(e.target.checked);
+                });
+                
+                document.getElementById('showStations').addEventListener('change', (e) => {
+                    this.toggleStations(e.target.checked);
+                });
+                
+                document.getElementById('showRailways').addEventListener('change', (e) => {
+                    this.toggleRailways(e.target.checked);
+                });
+            }
+            
+            connectWebSocket() {
+                const wsUrl = 'ws://localhost:8002';
+                console.log('连接WebSocket:', wsUrl);
+                
+                try {
+                    this.websocket = new WebSocket(wsUrl);
+                    
+                    this.websocket.onopen = () => {
+                        console.log('WebSocket连接成功');
+                        this.reconnectAttempts = 0;
+                        this.updateStatus('✅ 已连接到实时数据服务', 'success');
+                    };
+                    
+                    this.websocket.onmessage = (event) => {
+                        try {
+                            const data = JSON.parse(event.data);
+                            this.handleTrainUpdate(data);
+                        } catch (error) {
+                            console.error('解析WebSocket消息失败:', error);
+                        }
+                    };
+                    
+                    this.websocket.onclose = () => {
+                        console.log('WebSocket连接关闭');
+                        this.updateStatus('❌ 连接已断开', 'error');
+                        this.scheduleReconnect();
+                    };
+                    
+                    this.websocket.onerror = (error) => {
+                        console.error('WebSocket错误:', error);
+                        this.updateStatus('❌ 连接错误', 'error');
+                    };
+                    
+                } catch (error) {
+                    console.error('创建WebSocket连接失败:', error);
+                    this.updateStatus('❌ 无法连接到服务器', 'error');
+                }
+            }
+            
+            scheduleReconnect() {
+                if (this.reconnectAttempts < this.maxReconnectAttempts) {
+                    this.reconnectAttempts++;
+                    const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts), 30000);
+                    
+                    this.updateStatus(`🔄 ${delay/1000}秒后重连... (${this.reconnectAttempts}/${this.maxReconnectAttempts})`, 'warning');
+                    
+                    setTimeout(() => {
+                        this.connectWebSocket();
+                    }, delay);
+                } else {
+                    this.updateStatus('❌ 重连失败，请刷新页面', 'error');
+                }
+            }
+            
+            handleTrainUpdate(data) {
+                if (data.trains && Array.isArray(data.trains)) {
+                    data.trains.forEach(train => {
+                        this.updateTrainMarker(train);
+                    });
+                    
+                    document.getElementById('trainCount').textContent = `火车数量: ${data.trains.length}`;
+                }
+            }
+            
+            updateTrainMarker(train) {
+                if (!document.getElementById('showTrains').checked) return;
+                
+                const trainId = train.rid;
+                const lat = parseFloat(train.lat);
+                const lon = parseFloat(train.lon);
+                
+                if (isNaN(lat) || isNaN(lon)) return;
+                
+                if (this.trainMarkers.has(trainId)) {
+                    // 更新现有标记
+                    const marker = this.trainMarkers.get(trainId);
+                    marker.setLatLng([lat, lon]);
+                } else {
+                    // 创建新标记
+                    const marker = L.circleMarker([lat, lon], {
+                        radius: 6,
+                        fillColor: '#2196F3',
+                        color: 'white',
+                        weight: 2,
+                        opacity: 1,
+                        fillOpacity: 0.8
+                    }).addTo(this.map);
+                    
+                    // 添加弹出窗口
+                    marker.bindPopup(`
+                        <div style="font-family: Arial, sans-serif;">
+                            <h4 style="margin: 0 0 10px 0;">🚂 火车信息</h4>
+                            <p><strong>ID:</strong> ${train.rid}</p>
+                            <p><strong>状态:</strong> ${train.state || '未知'}</p>
+                            <p><strong>位置:</strong> ${lat.toFixed(4)}, ${lon.toFixed(4)}</p>
+                            ${train.from_tpl ? `<p><strong>起点:</strong> ${train.from_tpl}</p>` : ''}
+                            ${train.to_tpl ? `<p><strong>终点:</strong> ${train.to_tpl}</p>` : ''}
+                        </div>
+                    `);
+                    
+                    this.trainMarkers.set(trainId, marker);
+                }
+            }
+            
+            async loadStations() {
+                try {
+                    const response = await fetch('/static/stations.json');
+                    if (response.ok) {
+                        const stations = await response.json();
+                        this.stationsData = stations;
+                        console.log(`加载了 ${stations.length} 个车站`);
+                    }
+                } catch (error) {
+                    console.error('加载车站数据失败:', error);
+                }
+            }
+            
+            async loadRailways() {
+                try {
+                    const response = await fetch('/static/hotosm_gbr_railways_lines_geojson.geojson');
+                    if (response.ok) {
+                        const geojson = await response.json();
+                        this.railwayData = geojson;
+                        console.log('铁路线数据加载完成');
+                    }
+                } catch (error) {
+                    console.error('加载铁路线数据失败:', error);
+                }
+            }
+            
+            toggleTrains(show) {
+                this.trainMarkers.forEach(marker => {
+                    if (show) {
+                        marker.addTo(this.map);
+                    } else {
+                        this.map.removeLayer(marker);
+                    }
+                });
+            }
+            
+            toggleStations(show) {
+                if (show && this.stationsData) {
+                    this.stationMarkers.forEach(marker => this.map.removeLayer(marker));
+                    this.stationMarkers = [];
+                    
+                    this.stationsData.forEach(station => {
+                        if (station.lat && station.lon) {
+                            const marker = L.circleMarker([station.lat, station.lon], {
+                                radius: 4,
+                                fillColor: '#FF9800',
+                                color: 'white',
+                                weight: 1,
+                                opacity: 1,
+                                fillOpacity: 0.8
+                            }).addTo(this.map);
+                            
+                            marker.bindPopup(`
+                                <div style="font-family: Arial, sans-serif;">
+                                    <h4 style="margin: 0 0 10px 0;">🚉 ${station.stationName}</h4>
+                                    <p><strong>CRS:</strong> ${station.crsCode}</p>
+                                    <p><strong>位置:</strong> ${station.lat}, ${station.lon}</p>
+                                </div>
+                            `);
+                            
+                            this.stationMarkers.push(marker);
+                        }
+                    });
+                } else {
+                    this.stationMarkers.forEach(marker => this.map.removeLayer(marker));
+                    this.stationMarkers = [];
+                }
+            }
+            
+            toggleRailways(show) {
+                if (show && this.railwayData) {
+                    if (this.railwayLayer) {
+                        this.map.removeLayer(this.railwayLayer);
+                    }
+                    
+                    this.railwayLayer = L.geoJSON(this.railwayData, {
+                        style: {
+                            color: '#666',
+                            weight: 2,
+                            opacity: 0.6
+                        }
+                    }).addTo(this.map);
+                } else if (this.railwayLayer) {
+                    this.map.removeLayer(this.railwayLayer);
+                    this.railwayLayer = null;
+                }
+            }
+            
+            updateStatus(message, type = 'info') {
+                const statusEl = document.getElementById('status');
+                statusEl.textContent = message;
+                statusEl.className = type === 'error' ? 'error-info' : 'status-info';
+            }
+        }
+        
+        // 页面加载完成后初始化
+        document.addEventListener('DOMContentLoaded', () => {
+            new TrainTracker();
+        });
+    </script>
+</body>
+</html>
